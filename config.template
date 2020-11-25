@@ -40,7 +40,7 @@
 # Aliases have to be declared before using them, they can also be concatenated.
 
 # Examples:
-# @ term : alacritty
-# @ volumeup: amixer -q sset Master 3%+
-# - leftmeta, p < term
-# - VOLUMEUP < volumeup
+ @ term : alacritty
+ @ volumeup: amixer -q sset Master 3%+
+# - meta, p < term
+ - XF86AudioRaiseVolume < volumeup

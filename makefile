@@ -1,5 +1,6 @@
 CC ?= gcc
 CFLAGS = -Wall -Werror -pedantic --std=c99 -O2
+LDFLAGS = -lxkbcommon
 VERSION = 0.4
 PREFIX = /usr/local
 MANPREFIX = ${PREFIX}/share/man
@@ -7,7 +8,7 @@ MANPREFIX = ${PREFIX}/share/man
 hkd: hkd.c
 
 debug:
-	gcc -Wall -O0 -g hkd.c -o hkd_debug
+	gcc -Wall -O0 -g hkd.c -lxkbcommon -o hkd_debug
 
 install: hkd
 	mkdir -p ${DESTDIR}${PREFIX}/bin

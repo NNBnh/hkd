@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <locale.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/epoll.h>
@@ -39,11 +40,12 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <stdarg.h>
-#include "keys.h"
+#include <xkbcommon/xkbcommon.h>
+#include <linux/input.h>
 
 /* Value defines */
 #define FILE_NAME_MAX_LENGTH 255
-#define KEY_BUFFER_SIZE 16
+#define KEY_BUFFER_SIZE 10
 #define BLOCK_SIZE 512
 
 /* ANSI colors escape codes */
@@ -75,7 +77,7 @@ const char *config_paths[] = {
 };
 
 struct key_buffer {
-	unsigned short buf[KEY_BUFFER_SIZE];
+	xkb_keysym_t buf[KEY_BUFFER_SIZE];
 	unsigned int size;
 };
 
@@ -94,6 +96,14 @@ struct hotkey_list_e {
 	struct hotkey_list_e *next;
 };
 
+struct {
+	struct xkb_context *context;
+	struct xkb_rule_names names;
+	struct xkb_keymap *keymap;
+	struct xkb_state *state;
+//	struct xkb_compose_state *comp_state;
+} keyboard;
+
 struct hotkey_list_e *hotkey_list = NULL;
 unsigned long hotkey_size_mask = 0;
 char *ext_config_file = NULL;
@@ -101,8 +111,8 @@ char *ext_config_file = NULL;
 int vflag = 0;
 int dead = 0; /* Exit flag */
 /* key buffer operations */
-int key_buffer_add (struct key_buffer*, unsigned short);
-int key_buffer_remove (struct key_buffer*, unsigned short);
+int key_buffer_add (struct key_buffer*, xkb_keysym_t);
+int key_buffer_remove (struct key_buffer*, xkb_keysym_t);
 int key_buffer_compare_fuzzy (struct key_buffer *, struct key_buffer *);
 int key_buffer_compare (struct key_buffer *, struct key_buffer *);
 void key_buffer_reset (struct key_buffer *);
@@ -136,6 +146,8 @@ int main (int argc, char *argv[])
 	struct sigaction action;
 	struct input_event event;
 	struct key_buffer pb = {{0}, 0};	/* Pressed keys buffer */
+//	struct xkb_compose_table_t *comp_table = NULL;
+//	const char *locale = NULL;
 
 	/* Parse command line arguments */
 	while ((opc = getopt(argc, argv, "vc:dh")) != -1) {
@@ -167,6 +179,34 @@ int main (int argc, char *argv[])
 	sigaction(SIGUSR1, &action, NULL);
 	sigaction(SIGCHLD, &action, NULL);
 
+	/* Initialize xkbcommon */
+	if (!(keyboard.context = xkb_context_new(XKB_CONTEXT_NO_FLAGS)))
+		die("Error initializing xkbcommon context: ");
+
+	keyboard.names = (struct xkb_rule_names){
+		.rules = NULL,
+		.model = NULL,
+		.layout = "gb",
+		.variant = NULL,
+		.options = NULL,
+	};
+	
+	if (!(keyboard.keymap = xkb_keymap_new_from_names(keyboard.context,
+			&keyboard.names, XKB_KEYMAP_COMPILE_NO_FLAGS)))
+		die("Error compiling keymap: "); 
+
+	if (!(keyboard.state = xkb_state_new(keyboard.keymap)))
+		die("Error creating keyboard state: ");
+/*
+	locale = setlocale(LC_CTYPE, NULL);
+	if (!(comp_table = xkb_compose_table_new_from_locale(keyboard.context,
+			locale,	XKB_COMPOSE_COMPILE_NO_FLAGS)))
+		die("Error compiling compose table: ");
+	if (!(keyboard.comp_state = xkb_compose_state_new(comp_table,
+			XKB_COMPOSE_TABLE_NO_FLAGS)))
+		die("Error creating compose state: ");
+*/
+
 	/* Parse config file */
 	parse_config_file();
 
@@ -184,12 +224,15 @@ int main (int argc, char *argv[])
 
 	/* If a dump is requested print the hotkey list then exit */
 	if (dump) {
+		char key_name[64];
 		printf("DUMPING HOTKEY LIST\n\n");
 		for (struct hotkey_list_e *tmp = hotkey_list; tmp; tmp = tmp->next) {
 			printf("Hotkey\n");
 			printf("\tKeys: ");
-			for (unsigned int i = 0; i < tmp->data.kb.size; i++)
-				printf("%s ", code_to_name(tmp->data.kb.buf[i]));
+			for (unsigned int i = 0; i < tmp->data.kb.size; i++) {
+				xkb_keysym_get_name(tmp->data.kb.buf[i], key_name, 64);
+				printf("%s ", key_name);
+			}
 			printf("\n\tMatching: %s\n", tmp->fuzzy ? "fuzzy" : "ordered");
 			printf("\tCommand: %s\n\n", tmp->command);
 		}
@@ -214,8 +257,13 @@ int main (int argc, char *argv[])
 		int t = 0;
 		static unsigned int prev_size;
 		static struct epoll_event ev_type;
+		static xkb_keycode_t keycode;
+		static xkb_keysym_t keysym;
+//		enum xkb_state_component changed;
 		struct hotkey_list_e *tmp;
 		char buf[EVENT_BUF_LEN];
+		static char key_name[64];
+//		enum xkb_compose_status status;
 
 		/* On linux use epoll(2) as it gives better performance */
 		if (epoll_wait(ev_fd, &ev_type, fd_num, -1) < 0 || dead) {
@@ -241,24 +289,32 @@ int main (int argc, char *argv[])
 			read_b = read(fds[i], &event, sizeof(struct input_event));
 			if (read_b != sizeof(struct input_event)) continue;
 
-			/* Ignore touchpad events */
-			if (
-				event.type == EV_KEY &&
-				event.code != BTN_TOUCH &&
-				event.code != BTN_TOOL_FINGER &&
-				event.code != BTN_TOOL_DOUBLETAP &&
-				event.code != BTN_TOOL_TRIPLETAP
-				) {
-				switch (event.value) {
-				/* Key released */
-				case 0:
-					key_buffer_remove(&pb, event.code);
-					break;
-				/* Key pressed */
-				case 1:
-					key_buffer_add(&pb, event.code);
-					break;
-				}
+			if (event.type != EV_KEY)
+				continue;
+
+			// evdev offset
+			keycode = event.code + 8;
+			if (event.value == 2 && !xkb_keymap_key_repeats(
+					keyboard.keymap, keycode))
+				continue;
+			if (event.value) {
+				keysym = xkb_state_key_get_one_sym(keyboard.state, keycode);
+//				kbd_compose_state_feed(keyboard.comp_state, keysym);
+			}
+
+/*			status = xkb_compose_state_get_status(keyboard.comp_state);
+			if (status == XKB_COMPOSE_CANCELLED || status == XKB_COMPOSE_COMPOSED)
+				xkb_compose_state_reset(kbd->compose_state);
+*/
+
+			if (event.value) { 	/* Key pressed */
+				xkb_state_update_key(keyboard.state,
+					keycode, XKB_KEY_UP);
+				key_buffer_add(&pb, keysym);
+			} else {/* Key released */
+				xkb_state_update_key(keyboard.state,
+					keycode, XKB_KEY_DOWN);
+				key_buffer_remove(&pb, keysym);
 			}
 		}
 
@@ -268,7 +324,8 @@ int main (int argc, char *argv[])
 		if (vflag) {
 			printf("Pressed keys: ");
 			for (unsigned int i = 0; i < pb.size; i++)
-				printf("%s ", code_to_name(pb.buf[i]));
+			xkb_keysym_get_name(pb.buf[i], key_name, 64);
+				printf("%s ", key_name);
 			putchar('\n');
 		}
 
@@ -290,6 +347,10 @@ int main (int argc, char *argv[])
 	wait(NULL);
 	if (!dead)
 		fprintf(stderr, red("An error occured: %s\n"), errno ? strerror(errno): "idk");
+	xkb_state_unref(keyboard.state);
+	xkb_keymap_unref(keyboard.keymap);
+//	xkb_compose_state_unref(keyboard.comp_state);
+	xkb_context_unref(keyboard.context);
 	close(ev_fd);
 	close(event_watcher);
 	for (int i = 0; i < fd_num; i++)
@@ -300,7 +361,7 @@ int main (int argc, char *argv[])
 
 /* Adds a keycode to the pressed buffer if it is not already present
  * Returns non zero if the key was not added. */
-int key_buffer_add (struct key_buffer *pb, unsigned short key)
+int key_buffer_add (struct key_buffer *pb, xkb_keysym_t key)
 {
 	if (!pb) return 1;
 	/* Linear search if the key is already buffered */
@@ -317,7 +378,7 @@ int key_buffer_add (struct key_buffer *pb, unsigned short key)
 
 /* Removes a keycode from a pressed buffer if it is present returns
  * non zero in case of failure (key not present or buffer empty). */
-int key_buffer_remove (struct key_buffer *pb, unsigned short key)
+int key_buffer_remove (struct key_buffer *pb, xkb_keysym_t key)
 {
 	if (!pb) return 1;
 
@@ -574,7 +635,7 @@ void parse_config_file (void)
 	char *cmd = NULL;
 	char *cp_tmp = NULL;
 	union hotkey_main_data dt = {0};
-	unsigned short us_tmp = 0;
+	xkb_keysym_t ks_tmp = 0;
 
 	if (ext_config_file) {
 		switch (wordexp(ext_config_file, &result, 0)) {
@@ -779,12 +840,12 @@ void parse_config_file (void)
 
 				if (type != ALIAS) {
 					do {
-						if (!(us_tmp = key_to_code(cp_tmp))) {
+						if ((ks_tmp = xkb_keysym_from_name(cp_tmp, XKB_KEYSYM_NO_FLAGS)) == XKB_KEY_NoSymbol) {
 							die("Error at line %d: "
 							"%s is not a valid key",
 							linenum - 1, cp_tmp);
 						}
-						if (key_buffer_add(&dt.kb, us_tmp))
+						if (key_buffer_add(&dt.kb, ks_tmp))
 							die("Too many keys");
 					} while ((cp_tmp = strtok(NULL, ",")));
 				} else {
@@ -845,6 +906,7 @@ void parse_config_file (void)
 	}
 }
 
+/*
 unsigned short key_to_code (char *key)
 {
 	for (char *tmp = key; *tmp; tmp++) {
@@ -857,6 +919,7 @@ unsigned short key_to_code (char *key)
 	}
 	return 0;
 }
+*/
 
 void remove_lock (void)
 {
@@ -883,6 +946,7 @@ void die(const char *fmt, ...)
 	exit(errno ? errno : 1);
 }
 
+/*
 const char * code_to_name (unsigned int code)
 {
 	for (int i = 0; i < array_size_const(key_conversion_table); i++) {
@@ -891,6 +955,7 @@ const char * code_to_name (unsigned int code)
 	}
 	return "Key not recognized";
 }
+*/
 
 void usage (void)
 {
