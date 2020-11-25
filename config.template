@@ -30,3 +30,17 @@
 # - LEFALT,LEFTSHIFT,S: ~/screenshot.sh -c
 # * LEFTMETA,1,D: $SCRIPTDIR/wonkyscript
 # - LEFTMETA,LEFTALT,LEFTSHIFT,S: shutdown now
+
+# Aliases are a way to give a name to a possibly complex, long or recurring
+# command, to declaring aliases is similar to declaring an hotkey, you must
+# start the line with '@' to indicate an alias, give it a name (mind that this
+# is case sensitive), and a command after a ':', just like in hotkeys.
+# To use an alias in an hotkey you have to replace the ':' before the command
+# with '<' to indicate that the following string is an alias and not a command.
+# Aliases have to be declared before using them, they can also be concatenated.
+
+# Examples:
+# @ term : alacritty
+# @ volumeup: amixer -q sset Master 3%+
+# - leftmeta, p < term
+# - VOLUMEUP < volumeup

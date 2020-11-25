@@ -3,9 +3,6 @@ Improvements
 
 * Add option for autorepeat (useful for volume)
 	- User can configure autorepeat speed
-* add command aliases:
-	@ <name>: <command>
-
 
 Future plans
 ============

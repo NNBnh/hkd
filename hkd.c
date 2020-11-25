@@ -81,8 +81,14 @@ struct key_buffer {
 
 /* Hotkey list: linked list that holds all valid hoteys parsed from the
  * config file and the corresponding command */
-struct hotkey_list_e {
+
+union hotkey_main_data {
 	struct key_buffer kb;
+	char * name;
+};
+
+struct hotkey_list_e {
+	union hotkey_main_data data;
 	char *command;
 	int fuzzy;
 	struct hotkey_list_e *next;
@@ -112,8 +118,9 @@ int prepare_epoll (int *, int, int);
 unsigned short key_to_code (char *);
 const char * code_to_name (unsigned int);
 /* hotkey list operations */
-void hotkey_list_add (struct hotkey_list_e *, struct key_buffer *, char *, int);
+void hotkey_list_add (struct hotkey_list_e *, union hotkey_main_data *, char *, int);
 void hotkey_list_destroy (struct hotkey_list_e *);
+void hotkey_list_remove (struct hotkey_list_e *, struct hotkey_list_e *);
 
 int main (int argc, char *argv[])
 {
@@ -181,8 +188,8 @@ int main (int argc, char *argv[])
 		for (struct hotkey_list_e *tmp = hotkey_list; tmp; tmp = tmp->next) {
 			printf("Hotkey\n");
 			printf("\tKeys: ");
-			for (unsigned int i = 0; i < tmp->kb.size; i++)
-				printf("%s ", code_to_name(tmp->kb.buf[i]));
+			for (unsigned int i = 0; i < tmp->data.kb.size; i++)
+				printf("%s ", code_to_name(tmp->data.kb.buf[i]));
 			printf("\n\tMatching: %s\n", tmp->fuzzy ? "fuzzy" : "ordered");
 			printf("\tCommand: %s\n\n", tmp->command);
 		}
@@ -268,9 +275,9 @@ int main (int argc, char *argv[])
 		if (hotkey_size_mask & 1 << (pb.size - 1)) {
 			for (tmp = hotkey_list; tmp != NULL; tmp = tmp->next) {
 				if (tmp->fuzzy)
-					t = key_buffer_compare_fuzzy(&pb, &tmp->kb);
+					t = key_buffer_compare_fuzzy(&pb, &tmp->data.kb);
 				else
-					t = key_buffer_compare(&pb, &tmp->kb);
+					t = key_buffer_compare(&pb, &tmp->data.kb);
 				if (t)
 					exec_command(tmp->command);
 
@@ -507,7 +514,8 @@ void hotkey_list_destroy (struct hotkey_list_e *head)
 	}
 }
 
-void hotkey_list_add (struct hotkey_list_e *head, struct key_buffer *kb, char *cmd, int f)
+// FIXME: use **head or hardcode to hotkey_list
+void hotkey_list_add (struct hotkey_list_e *head, union hotkey_main_data *dt, char *cmd, int f)
 {
 	int size;
 	struct hotkey_list_e *tmp;
@@ -518,7 +526,7 @@ void hotkey_list_add (struct hotkey_list_e *head, struct key_buffer *kb, char *c
 	if (!(tmp->command = malloc(size + 1)))
 		die("Memory allocation failed in hotkey_list_add():");
 	strcpy(tmp->command, cmd);
-	tmp->kb = *kb;
+	tmp->data = *dt;
 	tmp->fuzzy = f;
 	tmp->next = NULL;
 
@@ -529,25 +537,45 @@ void hotkey_list_add (struct hotkey_list_e *head, struct key_buffer *kb, char *c
 		hotkey_list = tmp;
 }
 
+void hotkey_list_remove (struct hotkey_list_e *head, struct hotkey_list_e *elem)
+{
+	if(!head)
+		return;
+
+	if (head == elem) {
+		hotkey_list = head->next;
+	} else {
+		for (; head && head->next != elem; head = head->next);
+		if (head && head->next)
+			head->next = head->next->next;
+	}
+	if (elem) {
+		if (elem->fuzzy == -1)
+			free(elem->data.name);
+		free(elem->command);
+		free(elem);	
+	}
+}
+
 void parse_config_file (void)
 {
 	wordexp_t result = {0};
 	FILE *fd;
 	/* normal, skip line, get matching, get keys, get command, output */
-	enum {NORM, LINE_SKIP, GET_MATCH, GET_KEYS, GET_CMD, LAST} parse_state = NORM;
+	enum {NORM, LINE_SKIP, GET_TYPE, GET_KEYS, GET_CMD, LAST} parse_state = NORM;
 	enum {CONT, NEW_BL, LAST_BL, END} block_state = CONT; /* continue, new block, last block, end */
+	enum {HK_NORM = 0, HK_FUZZY = 1, ALIAS = -1} type;
+	int cmd_is_alias = 0;
 	int alloc_tmp = 0, alloc_size = 0;
-	int fuzzy = 0;
 	int i_tmp = 0, linenum = 1;
 	char block[BLOCK_SIZE + 1] = {0};
 	char *bb = NULL;
 	char *keys = NULL;
 	char *cmd = NULL;
 	char *cp_tmp = NULL;
-	struct key_buffer kb;
+	union hotkey_main_data dt = {0};
 	unsigned short us_tmp = 0;
 
-	key_buffer_reset(&kb);
 	if (ext_config_file) {
 		switch (wordexp(ext_config_file, &result, 0)) {
 		case 0:
@@ -627,12 +655,12 @@ void parse_config_file (void)
 					parse_state = LINE_SKIP;
 					break;
 				default:
-					parse_state = GET_MATCH;
+					parse_state = GET_TYPE;
 					break;
 				}
 				break;
 			// Skip line (comment)
-			case 1:
+			case LINE_SKIP:
 				while (*bb != '\n' && *bb)
 					bb++;
 				if (*bb) {
@@ -644,17 +672,20 @@ void parse_config_file (void)
 				}
 				break;
 			// Get compairson method
-			case 2:
+			case GET_TYPE:
 				switch (*bb) {
 				case '-':
-					fuzzy = 0;
+					type = HK_NORM;
 					break;
 				case '*':
-					fuzzy = 1;
+					type = HK_FUZZY;
+					break;
+				case '@':
+					type = ALIAS;
 					break;
 				default:
 					die("Error at line %d: "
-					"hotkey definition must start with '-' or '*'",
+					"hotkey definition must start with '-', '*' or '@'",
 					linenum);
 					break;
 				}
@@ -662,7 +693,7 @@ void parse_config_file (void)
 				parse_state = GET_KEYS;
 				break;
 			// Get keys
-			case 3:
+			case GET_KEYS:
 				if (!keys) {
 					if (!(keys = malloc(alloc_size = (sizeof(char) * 64))))
 						die("malloc for keys in parse_config_file():");
@@ -674,8 +705,10 @@ void parse_config_file (void)
 				}
 
 				for (alloc_tmp = 0; bb[alloc_tmp] &&
-				bb[alloc_tmp] != ':' && bb[alloc_tmp] != '\n' &&
-				alloc_tmp < alloc_size; alloc_tmp++);
+					bb[alloc_tmp] != ':' &&
+					bb[alloc_tmp] != '<' &&
+					bb[alloc_tmp] != '\n' &&
+					alloc_tmp < alloc_size; alloc_tmp++);
 
 				if (!bb[alloc_tmp] || alloc_tmp == alloc_size) {
 					strncat(keys, bb, alloc_tmp);
@@ -685,19 +718,20 @@ void parse_config_file (void)
 					else
 						block_state = NEW_BL;
 					break;
-				} else if (bb[alloc_tmp] == ':') {
+				} else if (bb[alloc_tmp] == ':' || bb[alloc_tmp] == '<') {
+					cmd_is_alias = (bb[alloc_tmp] == '<');
 					strncat(keys, bb, alloc_tmp);
 					bb += alloc_tmp + 1;
 					parse_state = GET_CMD;
 					break;
 				} else {
 					die("Error at line %d: "
-					"no command specified, missing ':' after keys",
+					"no command specified, missing ':' or '<' after keys",
 					linenum);
 				}
 				break;
 			// Get command
-			case 4:
+			case GET_CMD:
 				if (!cmd) {
 					if (!(cmd = malloc(alloc_size = (sizeof(char) * 128))))
 						die("malloc for cmd in parse_config_file():");
@@ -728,7 +762,7 @@ void parse_config_file (void)
 					break;
 				}
 				break;
-			case 5:
+			case LAST:
 				if (!keys)
 					die("error");
 				i_tmp = strlen(keys);
@@ -743,15 +777,21 @@ void parse_config_file (void)
 					die("Error at line %d: "
 					"keys not present", linenum - 1);
 
-				do {
-					if (!(us_tmp = key_to_code(cp_tmp))) {
-						die("Error at line %d: "
-						"%s is not a valid key",
-						linenum - 1, cp_tmp);
-					}
-					if (key_buffer_add(&kb, us_tmp))
-						die("Too many keys");
-				} while ((cp_tmp = strtok(NULL, ",")));
+				if (type != ALIAS) {
+					do {
+						if (!(us_tmp = key_to_code(cp_tmp))) {
+							die("Error at line %d: "
+							"%s is not a valid key",
+							linenum - 1, cp_tmp);
+						}
+						if (key_buffer_add(&dt.kb, us_tmp))
+							die("Too many keys");
+					} while ((cp_tmp = strtok(NULL, ",")));
+				} else {
+					if (!(dt.name = malloc(strlen(cp_tmp) + 1)))
+						die("malloc in parse_config_file():");
+					strcpy(dt.name, cp_tmp);
+				}
 
 				cp_tmp = cmd;
 				while (isblank(*cp_tmp))
@@ -759,11 +799,28 @@ void parse_config_file (void)
 				if (*cp_tmp == '\0')
 					die("Error at line %d: "
 					"command not present", linenum - 1);
+				if (cmd_is_alias) {
+					struct hotkey_list_e *hkl = hotkey_list;
+					// stolen way of removing leading spaces
+					char * end = cp_tmp + strlen(cp_tmp) - 1;
+					while(end > cp_tmp && isspace((unsigned char)*end)) end--;
+					end[1] = '\0';
+					
+					while (hkl && !(hkl->fuzzy == ALIAS && strstr(hkl->data.name, cp_tmp)))
+						hkl = hkl->next;
+					if (hkl) {
+						cp_tmp = hkl->command;
+					} else {
+						die("Error at line %d: "
+						"alias %s not found", linenum - 1,
+						cp_tmp);
+					}
+				}
 
-				hotkey_list_add(hotkey_list, &kb, cp_tmp, fuzzy);
-				hotkey_size_mask |= 1 << (kb.size - 1);
+				hotkey_list_add(hotkey_list, &dt, cp_tmp, type);
 
-				key_buffer_reset(&kb);
+				if (type != ALIAS)
+					key_buffer_reset(&dt.kb);
 				free(keys);
 				free(cmd);
 				cp_tmp = keys = cmd = NULL;
@@ -775,6 +832,15 @@ void parse_config_file (void)
 				break;
 
 			}
+		}
+	}
+	for (struct hotkey_list_e *hkl = hotkey_list, *tmp; hkl; hkl = hkl->next) {
+		if (hkl->fuzzy == ALIAS) {
+			tmp = hkl;
+			hkl = hkl->next;
+			hotkey_list_remove(hotkey_list, tmp);
+		} else { 
+			hotkey_size_mask |= 1 << (hkl->data.kb.size - 1);
 		}
 	}
 }
@@ -832,6 +898,6 @@ void usage (void)
 	     "\t-v        verbose, prints all the key presses and debug information\n"
 	     "\t-d        dump, dumps the hotkey list and exits\n"
 	     "\t-h        prints this help message\n"
-	     "\t-f file   uses the specified file as config\n");
+	     "\t-c file   uses the specified file as config\n");
 	exit(EXIT_SUCCESS);
 }
