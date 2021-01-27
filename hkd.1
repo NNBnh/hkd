@@ -36,7 +36,7 @@ override default configuration file location, instead using the specified
 as the temporary config file
 
 .SH FILES
-The configuration files are searched in the following order:
+The configuration files are selected in the following order:
 .I $XDG_CONFIG_HOME/hkd/config, $HOME/.config/hkd/config, /etc/hkd/config
 
 .SH USAGE
@@ -62,31 +62,38 @@ Normal matching means that the keys need to be pressed in the same order as they
 are declared, whereas fuzzy matching means that they can be pressed in any order.
 Aliases are a name-command pair that can be used instead of commands in hotkey
 definitions.
+
+
 .SS "Hotkey definition"
 Leading or trailing whitespaces are ignored, whitespaces between the marker and
-the ':' or '<' are also ignored, whitespaces after the ':' are not ignored.
-The general syntax for a hotkey is:
+the ':' are also ignored, whitespaces after the ':' ignored until the first
+non-whitespace character.
+The general syntax for an hotkey is:
 .EX
 <'*' or '\-'> <keys>: <command>
 .EE
-if a hotkeys uses an explicit command, if you want to use an alias it becomes:
-.EX
-<'*' or '\-'> <keys> < <alias name>
-.EE
-note the '<' instead of ':'.
+
+
 .SS "Alias definition"
 The general syntax for aliases is:
 .EX
 @ <name>: <command>
 .EE
 beware that alias names are case sensitive.
+
 .SS "Command field"
-Commads are expanded using 
+The command string gets analyzed and every instance of known aliases gets
+replaced with the appropriate command, this also applies for the command field
+in alias definitions.
+
+Upon execution commads are expanded using 
 .BR wordexp(3)
 so "|&;<>(){}" as well as unescaped newlines are forbidden and will result in
 error, read the manpage for
 .BR wordexp(3)
 for more info about the possible word expansion capabilities.
+
+
 .SS "Keys field"
 Possible keys are taken directly from linux's input.h header file, those
 include normal keys, multimedia keys, special keys and button events, for the
@@ -115,7 +122,8 @@ This is a valid config file example
 \- LEFALT,leftshift,S: ~/screenshot.sh \-c
 * LEFTMETA,1, D: $SCRIPTDIR/wonkyscript
 \- LEFTMETA ,LEFTALT,LEFTSHIFT,S : shutdown now
-\- leftmeta, enter < term
+# term gets substituted with xterm
+\- leftmeta, enter : term
 .EE
 
 .SH BUGS

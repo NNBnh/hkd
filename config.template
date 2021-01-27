@@ -9,7 +9,8 @@
 
 # Leading or trailing whitespaces are ignored, whitespaces between the marker
 # And the ':' are also ignored, the general syntax for a hotkey is:
-# marker keys: command
+# <marker> <keys>: <command>
+#
 # Whitespaces after the ':' count as that counts as the executed command for
 # the hotkey.
 # Commads are expanded using wordexp(3) so "|&;<>(){}" as well as unescaped
@@ -35,12 +36,12 @@
 # command, to declaring aliases is similar to declaring an hotkey, you must
 # start the line with '@' to indicate an alias, give it a name (mind that this
 # is case sensitive), and a command after a ':', just like in hotkeys.
-# To use an alias in an hotkey you have to replace the ':' before the command
-# with '<' to indicate that the following string is an alias and not a command.
-# Aliases have to be declared before using them, they can also be concatenated.
+# When parsing an hotkey or an alias commad, hkd automatically replaces every
+# instance of known aliases in it. for an alias to be known must be declared
+# before it's usage.
 
 # Examples:
 # @ term : alacritty
 # @ volumeup: amixer -q sset Master 3%+
-# - leftmeta, p < term
-# - VOLUMEUP < volumeup
+# - leftmeta, p : term
+# - VOLUMEUP : volumeup

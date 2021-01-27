@@ -39,6 +39,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <stdarg.h>
+#include <sys/mman.h>
 #include "keys.h"
 
 /* Value defines */
@@ -80,7 +81,9 @@ struct key_buffer {
 };
 
 /* Hotkey list: linked list that holds all valid hoteys parsed from the
- * config file and the corresponding command */
+ * config file and the corresponding command
+ * TODO: re-implement hotkey_list as a hash table to make searching O(1)
+ */
 
 union hotkey_main_data {
 	struct key_buffer kb;
@@ -95,6 +98,12 @@ struct hotkey_list_e {
 };
 
 struct hotkey_list_e *hotkey_list = NULL;
+/* TODO: add hotkey_range struct as a second check to avoid accessing the list
+ * struct {
+ *     unsigned int min;
+ *     unsigned int max;
+ * } hotkey_range;
+ */
 unsigned long hotkey_size_mask = 0;
 char *ext_config_file = NULL;
 /* Global flags */
@@ -111,7 +120,7 @@ void int_handler (int signum);
 void exec_command (char *);
 void parse_config_file (void);
 void update_descriptors_list (int **, int *);
-void remove_lock (void);
+inline void remove_lock (void);
 void die (const char *, ...);
 void usage (void);
 int prepare_epoll (int *, int, int);
@@ -121,6 +130,7 @@ const char * code_to_name (unsigned int);
 void hotkey_list_add (struct hotkey_list_e *, union hotkey_main_data *, char *, int);
 void hotkey_list_destroy (struct hotkey_list_e *);
 void hotkey_list_remove (struct hotkey_list_e *, struct hotkey_list_e *);
+void replace (char **, const char *, const char *);
 
 int main (int argc, char *argv[])
 {
@@ -560,15 +570,14 @@ void hotkey_list_remove (struct hotkey_list_e *head, struct hotkey_list_e *elem)
 void parse_config_file (void)
 {
 	wordexp_t result = {0};
-	FILE *fd;
+	int config_file;
 	/* normal, skip line, get matching, get keys, get command, output */
 	enum {NORM, LINE_SKIP, GET_TYPE, GET_KEYS, GET_CMD, LAST} parse_state = NORM;
-	enum {CONT, NEW_BL, LAST_BL, END} block_state = CONT; /* continue, new block, last block, end */
 	enum {HK_NORM = 0, HK_FUZZY = 1, ALIAS = -1} type;
-	int cmd_is_alias = 0;
-	int alloc_tmp = 0, alloc_size = 0;
+	int eof = 0;
+	int token_size = 0;
 	int i_tmp = 0, linenum = 1;
-	char block[BLOCK_SIZE + 1] = {0};
+	char *buffer;
 	char *bb = NULL;
 	char *keys = NULL;
 	char *cmd = NULL;
@@ -576,6 +585,7 @@ void parse_config_file (void)
 	union hotkey_main_data dt = {0};
 	unsigned short us_tmp = 0;
 
+	/* Choose config file */
 	if (ext_config_file) {
 		switch (wordexp(ext_config_file, &result, 0)) {
 		case 0:
@@ -589,9 +599,9 @@ void parse_config_file (void)
 			die("Path not valid:");
 		}
 
-		fd = fopen(result.we_wordv[0], "r");
+		config_file = open(result.we_wordv[0], O_RDONLY | O_NONBLOCK);
 		wordfree(&result);
-		if (!fd)
+		if (config_file < 0)
 			die("Error opening config file:");
 		free(ext_config_file);
 		ext_config_file = NULL;
@@ -609,231 +619,188 @@ void parse_config_file (void)
 				die("Path not valid:");
 			}
 
-			fd = fopen(result.we_wordv[0], "r");
+			config_file = open(result.we_wordv[0], O_RDONLY | O_NONBLOCK);
 			wordfree(&result);
-			if (fd)
+			if (config_file >= 0)
 				break;
 			if (vflag)
 				printf(yellow("config file not found at %s\n"), config_paths[i]);
 		}
-		if (!fd)
+		if (!config_file)
 			die("Could not open any config files, check the log for more details");
 	}
 
+	/* Using mmap because of simplicity, most config files are smaller than
+	 * a page but this method mostly ensures that big files are taken care
+	 * of efficiently and reduces the overall complexity of the code.
+	 * Furthermore we only need this space when parsing the config file,
+	 * afterwards we release it.
+	 */
+	struct stat sb;
+	int file_size;
+	if (fstat(config_file, &sb) == -1)
+         	die("fstat");
+        file_size = sb.st_size;
+        // FIXME: page align size
+        buffer = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, config_file, 0);
+        if (buffer == MAP_FAILED)
+        	die("mmap failed");
+	close(config_file);
+	bb = buffer;
+
+//	write(STDOUT_FILENO, bb, file_size);
+
 	hotkey_list_destroy(hotkey_list);
 	hotkey_list = NULL;
-	while (block_state != END) {
-		int tmp = 0;
-		memset(block, 0, BLOCK_SIZE + 1);
-		tmp = fread(block, sizeof(char), BLOCK_SIZE, fd);
-		if (!tmp)
-			break;
-		if (tmp < BLOCK_SIZE || feof(fd))
-			block_state = LAST_BL;
-		else
-			block_state = CONT;
-		bb = block;
-
-		while (block_state == CONT || block_state == LAST_BL) {
-			switch (parse_state) {
-			// First state
-			case NORM:
-				// remove whitespaces
-				while (isblank(*bb) && *bb)
-					bb++;
-				// get state
-				switch (*bb) {
-#if defined(__X86_64__) || defined(__i386__)
-				case EOF:
-#endif
-				case '\0':
-					// If it is the end of the last block exit
-					block_state = block_state == LAST_BL ? END : NEW_BL;
-					break;
-				case '\n':
-				case '#':
-					parse_state = LINE_SKIP;
-					break;
-				default:
-					parse_state = GET_TYPE;
-					break;
-				}
-				break;
-			// Skip line (comment)
-			case LINE_SKIP:
-				while (*bb != '\n' && *bb)
-					bb++;
-				if (*bb) {
-					bb++;
-					linenum++;
-					parse_state = NORM;
-				} else {
-					block_state = NEW_BL;
-				}
-				break;
-			// Get compairson method
-			case GET_TYPE:
-				switch (*bb) {
-				case '-':
-					type = HK_NORM;
-					break;
-				case '*':
-					type = HK_FUZZY;
-					break;
-				case '@':
-					type = ALIAS;
-					break;
-				default:
-					die("Error at line %d: "
-					"hotkey definition must start with '-', '*' or '@'",
-					linenum);
-					break;
-				}
+	while (!eof) {
+	// FIXME: incorect line counting, specialli for multiline commands
+		switch (parse_state) {
+		// First state
+		case NORM:
+		// FIXME: never ending cycle of death
+			// remove whitespaces
+			while (isblank(*bb))
 				bb++;
-				parse_state = GET_KEYS;
+			// get state
+			switch (*bb) {
+			case '\0':
+				eof = 1;
 				break;
-			// Get keys
-			case GET_KEYS:
-				if (!keys) {
-					if (!(keys = malloc(alloc_size = (sizeof(char) * 64))))
-						die("malloc for keys in parse_config_file():");
-					memset(keys, 0, alloc_size);
-				} else if (alloc_tmp >= alloc_size) {
-					if (!(keys = realloc(keys, alloc_size = alloc_size * 2)))
-						die("realloc for keys in parse_config_file():");
-					memset(&keys[alloc_size / 2], 0, alloc_size / 2);
-				}
-
-				for (alloc_tmp = 0; bb[alloc_tmp] &&
-					bb[alloc_tmp] != ':' &&
-					bb[alloc_tmp] != '<' &&
-					bb[alloc_tmp] != '\n' &&
-					alloc_tmp < alloc_size; alloc_tmp++);
-
-				if (!bb[alloc_tmp] || alloc_tmp == alloc_size) {
-					strncat(keys, bb, alloc_tmp);
-					bb += alloc_tmp;
-					if (block_state == LAST_BL)
-						die("Keys not finished before end of file");
-					else
-						block_state = NEW_BL;
-					break;
-				} else if (bb[alloc_tmp] == ':' || bb[alloc_tmp] == '<') {
-					cmd_is_alias = (bb[alloc_tmp] == '<');
-					strncat(keys, bb, alloc_tmp);
-					bb += alloc_tmp + 1;
-					parse_state = GET_CMD;
-					break;
-				} else {
-					die("Error at line %d: "
-					"no command specified, missing ':' or '<' after keys",
-					linenum);
-				}
-				break;
-			// Get command
-			case GET_CMD:
-				if (!cmd) {
-					if (!(cmd = malloc(alloc_size = (sizeof(char) * 128))))
-						die("malloc for cmd in parse_config_file():");
-					memset(cmd, 0, alloc_size);
-				} else if (alloc_tmp >= alloc_size) {
-					if (!(cmd = realloc(cmd, alloc_size = alloc_size * 2)))
-						die("realloc for cmd in parse_config_file():");
-					memset(&cmd[alloc_size / 2], 0, alloc_size / 2);
-				}
-
-				for (alloc_tmp = 0; bb[alloc_tmp] && bb[alloc_tmp] != '\n' &&
-				alloc_tmp < alloc_size; alloc_tmp++);
-
-				if (!bb[alloc_tmp] || alloc_tmp == alloc_size) {
-					strncat(cmd, bb, alloc_tmp);
-					bb += alloc_tmp;
-					if (block_state == LAST_BL)
-						die("Command not finished before end of file");
-					else
-						block_state = NEW_BL;
-					break;
-				} else {
-					strncat(cmd, bb, alloc_tmp);
-					if (!(bb[alloc_tmp - 1] == '\\'))
-						parse_state = LAST;
-					bb += alloc_tmp + 1;
-					linenum++;
-					break;
-				}
-				break;
-			case LAST:
-				if (!keys)
-					die("error");
-				i_tmp = strlen(keys);
-				for (int i = 0; i < i_tmp; i++) {
-					if (isblank(keys[i])) {
-						memmove(&keys[i], &keys[i + 1], --i_tmp);
-						keys[i_tmp] = '\0';
-						}
-				}
-				cp_tmp = strtok(keys, ",");
-				if(!cp_tmp)
-					die("Error at line %d: "
-					"keys not present", linenum - 1);
-
-				if (type != ALIAS) {
-					do {
-						if (!(us_tmp = key_to_code(cp_tmp))) {
-							die("Error at line %d: "
-							"%s is not a valid key",
-							linenum - 1, cp_tmp);
-						}
-						if (key_buffer_add(&dt.kb, us_tmp))
-							die("Too many keys");
-					} while ((cp_tmp = strtok(NULL, ",")));
-				} else {
-					if (!(dt.name = malloc(strlen(cp_tmp) + 1)))
-						die("malloc in parse_config_file():");
-					strcpy(dt.name, cp_tmp);
-				}
-
-				cp_tmp = cmd;
-				while (isblank(*cp_tmp))
-					cp_tmp++;
-				if (*cp_tmp == '\0')
-					die("Error at line %d: "
-					"command not present", linenum - 1);
-				if (cmd_is_alias) {
-					struct hotkey_list_e *hkl = hotkey_list;
-					// stolen way of removing leading spaces
-					char * end = cp_tmp + strlen(cp_tmp) - 1;
-					while(end > cp_tmp && isspace((unsigned char)*end)) end--;
-					end[1] = '\0';
-					
-					while (hkl && !(hkl->fuzzy == ALIAS && strstr(hkl->data.name, cp_tmp)))
-						hkl = hkl->next;
-					if (hkl) {
-						cp_tmp = hkl->command;
-					} else {
-						die("Error at line %d: "
-						"alias %s not found", linenum - 1,
-						cp_tmp);
-					}
-				}
-
-				hotkey_list_add(hotkey_list, &dt, cp_tmp, type);
-
-				if (type != ALIAS)
-					key_buffer_reset(&dt.kb);
-				free(keys);
-				free(cmd);
-				cp_tmp = keys = cmd = NULL;
-				i_tmp = 0;
-				parse_state = NORM;
+			case '\n':
+			case '#':
+				parse_state = LINE_SKIP;
 				break;
 			default:
-				die("Unknown state in parse_config_file");
+				parse_state = GET_TYPE;
 				break;
-
 			}
+			break;
+		// Skip line (comment)
+		case LINE_SKIP:
+			// FIXME: check end of file
+			for (;*bb != '\n'; bb++);
+			bb++;
+			linenum++;
+			parse_state = NORM;
+			break;
+		// Get compairson method
+		case GET_TYPE:
+			switch (*bb) {
+			case '-':
+				type = HK_NORM;
+				break;
+			case '*':
+				type = HK_FUZZY;
+				break;
+			case '@':
+				type = ALIAS;
+				break;
+			default:
+				die("Error at line %d: "
+				"hotkey definition must start with '-', '*' or '@'",
+				linenum);
+				break;
+			}
+			bb++;
+			parse_state = GET_KEYS;
+			break;
+		// Get keys
+		case GET_KEYS:
+			// FIXME: check end of file, token_size >= remaining_size
+			for (token_size = 0; token_size < (file_size - (bb - buffer)) && !(bb[token_size] == ':' || bb[token_size] == '\n'); token_size++);
+			if (bb[token_size] == '\n')
+				die("Error at line %d: "
+				"no command specified, missing ':' after keys",
+				linenum);
+			keys = malloc(token_size + 1);
+			if (!keys)
+				die("malloc failed in keys");
+			memcpy(keys, bb, token_size);
+			keys[token_size] = '\0';
+			bb += token_size + 1;
+			parse_state = GET_CMD;
+			break;
+		// Get command
+		case GET_CMD:
+			// FIXME: check end of file, token_size >= remaining_size
+			for (token_size = 0; token_size < (file_size - !(bb - buffer)); token_size++) {
+				if (bb[token_size] == ':')
+					break;
+				if (bb[token_size] == '\n' && bb[token_size - token_size ? 1 : 0] != '\\')
+					break;
+			}
+			cmd = malloc(token_size + 1);
+			if (!cmd)
+				die("malloc failed in cmd");
+			memcpy(cmd, bb, token_size);
+			cmd[token_size] = '\0';
+			bb += token_size;
+			parse_state = LAST;
+			break;
+		case LAST:
+			if (!keys)
+				die("error");
+			i_tmp = strlen(keys);
+			for (int i = 0; i < i_tmp; i++) {
+				if (isblank(keys[i])) {
+					memmove(&keys[i], &keys[i + 1], --i_tmp);
+					keys[i_tmp] = '\0';
+					}
+			}
+			cp_tmp = strtok(keys, ",");
+			if(!cp_tmp)
+				die("Error at line %d: "
+				"keys not present", linenum - 1);
+
+			if (type != ALIAS) {
+				do {
+					if (!(us_tmp = key_to_code(cp_tmp))) {
+						die("Error at line %d: "
+						"%s is not a valid key",
+						linenum - 1, cp_tmp);
+					}
+					if (key_buffer_add(&dt.kb, us_tmp))
+						die("Too many keys");
+				} while ((cp_tmp = strtok(NULL, ",")));
+			} else {
+				if (!(dt.name = malloc(strlen(cp_tmp) + 1)))
+					die("malloc in parse_config_file():");
+				strcpy(dt.name, cp_tmp);
+			}
+
+			/* search the command in the known aliases and replace */
+			struct hotkey_list_e *hkl = hotkey_list;
+			while (hkl && hkl->fuzzy == ALIAS) {
+				replace(&cmd, hkl->data.name, hkl->command);
+				hkl = hkl->next;
+			}
+
+			cp_tmp = cmd;
+			while (isblank(*cp_tmp))
+				cp_tmp++;
+			if (*cp_tmp == '\0')
+				die("Error at line %d: "
+				"command not present", linenum - 1);
+
+
+			hotkey_list_add(hotkey_list, &dt, cp_tmp, type);
+
+			if (type != ALIAS)
+				key_buffer_reset(&dt.kb);
+			free(keys);
+			free(cmd);
+			cp_tmp = keys = cmd = NULL;
+			i_tmp = 0;
+			parse_state = NORM;
+			break;
+		default:
+			die("Unknown state in parse_config_file");
+			break;
+
 		}
 	}
+	munmap(buffer, file_size);
+
 	for (struct hotkey_list_e *hkl = hotkey_list, *tmp; hkl; hkl = hkl->next) {
 		if (hkl->fuzzy == ALIAS) {
 			tmp = hkl;
@@ -900,4 +867,43 @@ void usage (void)
 	     "\t-h        prints this help message\n"
 	     "\t-c file   uses the specified file as config\n");
 	exit(EXIT_SUCCESS);
+}
+
+/* replaces every instance of m(match) with r(eplace) inside of s */
+void replace (char **s, const char *m, const char *r)
+{
+	char **new_s = s;
+	int ms = strlen(m), rs = strlen(r);
+	char *t1;
+
+	int count = 0;
+	int *offs = NULL, o = 0, *t2;
+	int nss = strlen(*new_s);
+	while ((t1 = strstr(*new_s + o, m))) {
+		/* check if the match is surrounded by whitespace */
+		if ((t1[ms] == '\0' || isblank(t1[ms]))
+			&& isblank(t1 > *new_s ? *(t1 - 1) : ' ')) {
+			if (!(t2 = realloc(offs, sizeof(int) * (count + 1))))
+				die("bad realloc");
+			offs = t2;
+			offs[count] = (t1 - *new_s) + (rs - ms) * count;
+			count++;
+		}
+		o = (t1 - *new_s) + 1;
+	}
+
+	if ((rs - ms) > 0) {
+		if (!(t1 = realloc(*new_s, nss + (rs - ms) * count)))
+			die("bad realloc");
+		*new_s = t1;
+	}
+
+	for (int i = 0; i < count; i++) {
+		char* x = *new_s + offs[i];
+		int d = strlen(x) - ms;
+		memmove(x + rs, x + ms, d);
+		memcpy(x, r, rs);
+	}
+	if (offs)
+		free(offs);
 }
