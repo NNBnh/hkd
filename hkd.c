@@ -653,11 +653,10 @@ void parse_config_file (void)
 	hotkey_list_destroy(hotkey_list);
 	hotkey_list = NULL;
 	while (!eof) {
-	// FIXME: incorect line counting, specialli for multiline commands
+	// FIXME: incorect line counting, especially for multiline commands
 		switch (parse_state) {
 		// First state
 		case NORM:
-		// FIXME: never ending cycle of death
 			// remove whitespaces
 			while (isblank(*bb))
 				bb++;
@@ -677,8 +676,7 @@ void parse_config_file (void)
 			break;
 		// Skip line (comment)
 		case LINE_SKIP:
-			// FIXME: check end of file
-			for (;*bb != '\n'; bb++);
+			for (;(bb - buffer) < file_size && *bb != '\n'; bb++);
 			bb++;
 			linenum++;
 			parse_state = NORM;
@@ -706,7 +704,6 @@ void parse_config_file (void)
 			break;
 		// Get keys
 		case GET_KEYS:
-			// FIXME: check end of file, token_size >= remaining_size
 			for (token_size = 0; token_size < (file_size - (bb - buffer)) && !(bb[token_size] == ':' || bb[token_size] == '\n'); token_size++);
 			if (bb[token_size] == '\n')
 				die("Error at line %d: "
@@ -722,7 +719,6 @@ void parse_config_file (void)
 			break;
 		// Get command
 		case GET_CMD:
-			// FIXME: check end of file, token_size >= remaining_size
 			for (token_size = 0; token_size < (file_size - !(bb - buffer)); token_size++) {
 				if (bb[token_size] == ':')
 					break;
@@ -801,14 +797,13 @@ void parse_config_file (void)
 	}
 	munmap(buffer, file_size);
 
-	for (struct hotkey_list_e *hkl = hotkey_list, *tmp; hkl; hkl = hkl->next) {
-		if (hkl->fuzzy == ALIAS) {
-			tmp = hkl;
-			hkl = hkl->next;
+	for (struct hotkey_list_e *hkl = hotkey_list, *tmp; hkl;) {
+		tmp = hkl;
+		hkl = hkl->next;
+		if (tmp->fuzzy == ALIAS)
 			hotkey_list_remove(hotkey_list, tmp);
-		} else { 
-			hotkey_size_mask |= 1 << (hkl->data.kb.size - 1);
-		}
+		else
+			hotkey_size_mask |= 1 << (tmp->data.kb.size - 1);
 	}
 }
 
