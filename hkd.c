@@ -63,6 +63,7 @@
 #define test_bit(yalv, abs_b) ((((char *)abs_b)[yalv/8] & (1<<yalv%8)) > 0)
 #define array_size(val) (val ? sizeof(val)/sizeof(val[0]) : 0)
 #define array_size_const(val) ((int)(sizeof(val)/sizeof(val[0])))
+#define wrap_err(s) "[%s] " s, __func__
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define EVENT_BUF_LEN (1024*(EVENT_SIZE+16))
@@ -156,7 +157,7 @@ int main (int argc, char *argv[])
 		case 'c':
 			ext_config_file = malloc(strlen(optarg) + 1);
 			if (!ext_config_file)
-				die("malloc in main():");
+				die(wrap_err("Bad malloc:"));
 			 strcpy(ext_config_file, optarg);
 			 break;
 		case 'd':
@@ -183,7 +184,7 @@ int main (int argc, char *argv[])
 	/* Check if hkd is already running */
 	lock_file_descriptor = open(LOCK_FILE, O_RDWR | O_CREAT, 0600);
 	if (lock_file_descriptor < 0)
-		die("Can't open lock file:");
+		die(wrap_err("Can't open lock file:"));
 	fl.l_start = 0;
 	fl.l_len = 0;
 	fl.l_type = F_WRLCK;
@@ -211,10 +212,9 @@ int main (int argc, char *argv[])
 
 	/* Prepare directory update watcher */
 	if (event_watcher < 0)
-		die("Could not call inotify_init:");
+		die(wrap_err("Could not call inotify_init:"));
 	if (inotify_add_watch(event_watcher, EVDEV_ROOT_DIR, IN_CREATE | IN_DELETE) < 0)
-		die("Could not add /dev/input to the watch list:");
-
+		die(wrap_err("Could not add /dev/input to the watch list:"));
 	/* Prepare epoll list */
 	ev_fd = prepare_epoll(fds, fd_num, event_watcher);
 
@@ -240,7 +240,7 @@ int main (int argc, char *argv[])
 			sleep(1); // wait for devices to settle
 			update_descriptors_list(&fds, &fd_num);
 			if (close(ev_fd) < 0)
-				die("Could not close event filedescriptors list (ev_fd):");
+				die(wrap_err("Could not close event fd list (ev_fd):"));
 			ev_fd = prepare_epoll(fds, fd_num, event_watcher);
 			goto mainloop_begin;
 		}
@@ -304,7 +304,7 @@ int main (int argc, char *argv[])
 	close(event_watcher);
 	for (int i = 0; i < fd_num; i++)
 		if (close(fds[i]) == -1)
-			die("Error closing file descriptors:");
+			die(wrap_err("Error closing file descriptors:"));
 	return 0;
 }
 
@@ -352,7 +352,7 @@ void int_handler (int signum)
 	switch (signum) {
 	case SIGINT:
 		if (dead)
-			die("An error occured, exiting");
+			die(wrap_err("An error occured, exiting"));
 		if (vflag)
 			printf(yellow("Received interrupt signal, exiting gracefully...\n"));
 		dead = 1;
@@ -382,20 +382,20 @@ void exec_command (char *command)
 		return;
 	default:
 		/* Some other error */
-		fprintf(stderr, "Could not parse, %s is not valid\n", command);
+		fprintf(stderr, wrap_err("Could not parse, %s is not valid\n"), command);
 		return;
 	}
 
 	pid_t cpid;
 	switch (cpid = fork()) {
 	case -1:
-		fprintf(stderr, "Could not create child process: %s", strerror(errno));
+		fprintf(stderr, wrap_err("Could not create child process: %s"), strerror(errno));
 		wordfree(&result);
 		break;
 	case 0:
 		/* This is the child process, execute the command */
 		execvp(result.we_wordv[0], result.we_wordv);
-		die("%s:", command);
+		die(wrap_err("%s:"), command);
 		break;
 	default:
 		while (waitpid(cpid, NULL, WNOHANG) == -1) {}
@@ -414,7 +414,7 @@ void update_descriptors_list (int **fds, int *fd_num)
 	/* Open the event directory */
 	DIR *ev_dir = opendir(EVDEV_ROOT_DIR);
 	if (!ev_dir)
-		die("Could not open /dev/input:");
+		die(wrap_err("Could not open /dev/input:"));
 
 	(*fd_num) = 0;
 
@@ -441,7 +441,7 @@ void update_descriptors_list (int **fds, int *fd_num)
 		memset(evtype_b, 0, sizeof(evtype_b));
 		if (ioctl(tmp_fd, EVIOCGBIT(0, EV_MAX), evtype_b) < 0) {
 			if (vflag)
-				printf(red("Could not read capabilities of device %s\n"),ev_path);
+				printf(red("Could not read capabilities of device %s\n"), ev_path);
 			close(tmp_fd);
 			continue;
 		}
@@ -455,7 +455,7 @@ void update_descriptors_list (int **fds, int *fd_num)
 
 		tmp_p = realloc((*fds), sizeof(int) * ((*fd_num) + 1));
 		if (!tmp_p)
-			die("realloc file descriptors:");
+			die(wrap_err("Realloc file descriptors:"));
 		(*fds) = (int *) tmp_p;
 
 		(*fds)[(*fd_num)] = tmp_fd;
@@ -466,7 +466,7 @@ void update_descriptors_list (int **fds, int *fd_num)
 		if (vflag)
 			printf(green("Monitoring %d devices\n"), *fd_num);
 	} else {
-		die("Could not open any devices, exiting");
+		die(wrap_err("Could not open any devices, exiting"));
 	}
 }
 
@@ -476,12 +476,12 @@ int prepare_epoll (int *fds, int fd_num, int event_watcher)
 	static struct epoll_event epoll_read_ev;
  	epoll_read_ev.events = EPOLLIN;
  	if (ev_fd < 0)
- 		die("epoll_create failed in prepare_epoll:");
+ 		die(wrap_err("epoll_create failed:"));
  	if (epoll_ctl(ev_fd, EPOLL_CTL_ADD, event_watcher, &epoll_read_ev) < 0)
- 		die("Could not add file descriptor to the epoll list:");
+ 		die(wrap_err("Could not add file descriptor to the epoll list:"));
  	for (int i = 0; i < fd_num; i++)
  		if (epoll_ctl(ev_fd, EPOLL_CTL_ADD, fds[i], &epoll_read_ev) < 0)
- 			die("Could not add file descriptor to the epoll list:");
+ 			die(wrap_err("Could not add file descriptor to the epoll list:"));
 	return ev_fd;
 }
 
@@ -532,9 +532,9 @@ void hotkey_list_add (struct hotkey_list_e *head, union hotkey_main_data *dt, ch
 	if (!(size = strlen(cmd)))
 		return;
 	if (!(tmp = malloc(sizeof(struct hotkey_list_e))))
-		die("Memory allocation failed in hotkey_list_add():");
+		die(wrap_err("Bad malloc:"));
 	if (!(tmp->command = malloc(size + 1)))
-		die("Memory allocation failed in hotkey_list_add():");
+		die(wrap_err("Bad malloc:"));
 	strcpy(tmp->command, cmd);
 	tmp->data = *dt;
 	tmp->fuzzy = f;
@@ -594,15 +594,15 @@ void parse_config_file (void)
 			/* If the error was WRDE_NOSPACE,
 		 	 * then perhaps part of the result was allocated */
 			wordfree (&result);
-			die("Not enough space:");
+			die(wrap_err("Not enough space:"));
 		default:
-			die("Path not valid:");
+			die(wrap_err("Path not valid:"));
 		}
 
 		config_file = open(result.we_wordv[0], O_RDONLY | O_NONBLOCK);
 		wordfree(&result);
 		if (config_file < 0)
-			die("Error opening config file:");
+			die(wrap_err("Error opening config file:"));
 		free(ext_config_file);
 		ext_config_file = NULL;
 	} else {
@@ -614,9 +614,9 @@ void parse_config_file (void)
 				/* If the error was WRDE_NOSPACE,
 		 		 * then perhaps part of the result was allocated */
 				wordfree (&result);
-				die("Not enough space:");
+				die(wrap_err("Not enough space:"));
 			default:
-				die("Path not valid:");
+				die(wrap_err("Path not valid:"));
 			}
 
 			config_file = open(result.we_wordv[0], O_RDONLY | O_NONBLOCK);
@@ -627,7 +627,7 @@ void parse_config_file (void)
 				printf(yellow("config file not found at %s\n"), config_paths[i]);
 		}
 		if (!config_file)
-			die("Could not open any config files, check the log for more details");
+			die(wrap_err("Could not open any config files, check stderr for more details"));
 	}
 
 	/* Using mmap because of simplicity, most config files are smaller than
@@ -644,11 +644,9 @@ void parse_config_file (void)
         // FIXME: page align size
         buffer = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, config_file, 0);
         if (buffer == MAP_FAILED)
-        	die("mmap failed");
+        	die(wrap_err("mmap failed:"));
 	close(config_file);
 	bb = buffer;
-
-//	write(STDOUT_FILENO, bb, file_size);
 
 	hotkey_list_destroy(hotkey_list);
 	hotkey_list = NULL;
@@ -694,8 +692,8 @@ void parse_config_file (void)
 				type = ALIAS;
 				break;
 			default:
-				die("Error at line %d: "
-				"hotkey definition must start with '-', '*' or '@'",
+				die(wrap_err("Error at line %d: "
+				"hotkey definition must start with '-', '*' or '@'"),
 				linenum);
 				break;
 			}
@@ -706,12 +704,12 @@ void parse_config_file (void)
 		case GET_KEYS:
 			for (token_size = 0; token_size < (file_size - (bb - buffer)) && !(bb[token_size] == ':' || bb[token_size] == '\n'); token_size++);
 			if (bb[token_size] == '\n')
-				die("Error at line %d: "
-				"no command specified, missing ':' after keys",
+				die(wrap_err("Error at line %d: "
+				"no command specified, missing ':' after keys"),
 				linenum);
 			keys = malloc(token_size + 1);
 			if (!keys)
-				die("malloc failed in keys");
+				die(wrap_err("Bad malloc parsing keys:"));
 			memcpy(keys, bb, token_size);
 			keys[token_size] = '\0';
 			bb += token_size + 1;
@@ -727,7 +725,7 @@ void parse_config_file (void)
 			}
 			cmd = malloc(token_size + 1);
 			if (!cmd)
-				die("malloc failed in cmd");
+				die(wrap_err("Bad malloc parsing command:"));
 			memcpy(cmd, bb, token_size);
 			cmd[token_size] = '\0';
 			bb += token_size;
@@ -735,7 +733,7 @@ void parse_config_file (void)
 			break;
 		case LAST:
 			if (!keys)
-				die("error");
+				die(wrap_err("Keys is NULL"));
 			i_tmp = strlen(keys);
 			for (int i = 0; i < i_tmp; i++) {
 				if (isblank(keys[i])) {
@@ -745,22 +743,22 @@ void parse_config_file (void)
 			}
 			cp_tmp = strtok(keys, ",");
 			if(!cp_tmp)
-				die("Error at line %d: "
-				"keys not present", linenum - 1);
+				die(wrap_err("Error at line %d: "
+				"keys not present"), linenum - 1);
 
 			if (type != ALIAS) {
 				do {
 					if (!(us_tmp = key_to_code(cp_tmp))) {
-						die("Error at line %d: "
-						"%s is not a valid key",
+						die(wrap_err("Error at line %d: "
+						"%s is not a valid key"),
 						linenum - 1, cp_tmp);
 					}
 					if (key_buffer_add(&dt.kb, us_tmp))
-						die("Too many keys");
+						die(wrap_err("Too many keys"));
 				} while ((cp_tmp = strtok(NULL, ",")));
 			} else {
 				if (!(dt.name = malloc(strlen(cp_tmp) + 1)))
-					die("malloc in parse_config_file():");
+					die(wrap_err("Bad malloc:"));
 				strcpy(dt.name, cp_tmp);
 			}
 
@@ -775,8 +773,8 @@ void parse_config_file (void)
 			while (isblank(*cp_tmp))
 				cp_tmp++;
 			if (*cp_tmp == '\0')
-				die("Error at line %d: "
-				"command not present", linenum - 1);
+				die(wrap_err("Error at line %d: "
+				"command not present"), linenum - 1);
 
 
 			hotkey_list_add(hotkey_list, &dt, cp_tmp, type);
@@ -790,7 +788,7 @@ void parse_config_file (void)
 			parse_state = NORM;
 			break;
 		default:
-			die("Unknown state in parse_config_file");
+			die(wrap_err("Unknown state"));
 			break;
 
 		}
@@ -879,7 +877,7 @@ void replace (char **s, const char *m, const char *r)
 		if ((t1[ms] == '\0' || isblank(t1[ms]))
 			&& isblank(t1 > *new_s ? *(t1 - 1) : ' ')) {
 			if (!(t2 = realloc(offs, sizeof(int) * (count + 1))))
-				die("bad realloc");
+				die(wrap_err("Bad realloc:"));
 			offs = t2;
 			offs[count] = (t1 - *new_s) + (rs - ms) * count;
 			count++;
@@ -889,7 +887,7 @@ void replace (char **s, const char *m, const char *r)
 
 	if ((rs - ms) > 0) {
 		if (!(t1 = realloc(*new_s, nss + (rs - ms) * count)))
-			die("bad realloc");
+			die(wrap_err("Bad realloc:"));
 		*new_s = t1;
 	}
 
