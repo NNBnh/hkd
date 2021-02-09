@@ -64,6 +64,7 @@
 #define array_size(val) (val ? sizeof(val)/sizeof(val[0]) : 0)
 #define array_size_const(val) ((int)(sizeof(val)/sizeof(val[0])))
 #define wrap_err(s) "[%s] " s, __func__
+#define is_empty(s) (!(s) || !(s)[0])
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define EVENT_BUF_LEN (1024*(EVENT_SIZE+16))
@@ -529,7 +530,7 @@ void hotkey_list_add (struct hotkey_list_e *head, union hotkey_main_data *dt, ch
 {
 	int size;
 	struct hotkey_list_e *tmp;
-	if (!(size = strlen(cmd)))
+	if (is_empty(cmd) || !(size = strlen(cmd)))
 		return;
 	if (!(tmp = malloc(sizeof(struct hotkey_list_e))))
 		die(wrap_err("Bad malloc:"));
@@ -736,10 +737,8 @@ void parse_config_file (void)
 				die(wrap_err("Keys is NULL"));
 			i_tmp = strlen(keys);
 			for (int i = 0; i < i_tmp; i++) {
-				if (isblank(keys[i])) {
-					memmove(&keys[i], &keys[i + 1], --i_tmp);
-					keys[i_tmp] = '\0';
-					}
+				if (isblank(keys[i]))
+					memmove(&keys[i], &keys[i + 1], i_tmp - i);
 			}
 			cp_tmp = strtok(keys, ",");
 			if(!cp_tmp)
@@ -865,34 +864,39 @@ void usage (void)
 /* replaces every instance of m(match) with r(eplace) inside of s */
 void replace (char **s, const char *m, const char *r)
 {
-	char **new_s = s;
-	int ms = strlen(m), rs = strlen(r);
-	char *t1;
+	if (is_empty(s) || is_empty(*s) || is_empty(m) || is_empty(r))
+		return;
 
-	int count = 0;
-	int *offs = NULL, o = 0, *t2;
-	int nss = strlen(*new_s);
-	while ((t1 = strstr(*new_s + o, m))) {
+	int ms = strlen(m), rs = strlen(r);
+	int count = 0, o = 0;
+	int *offs = NULL, *t2 = NULL;
+	char *t1 = NULL;
+	
+	while ((t1 = strstr((*s) + o, m))) {
 		/* check if the match is surrounded by whitespace */
 		if ((t1[ms] == '\0' || isblank(t1[ms]))
-			&& isblank(t1 > *new_s ? *(t1 - 1) : ' ')) {
+			&& isblank(t1 > *s ? *(t1 - 1) : ' ')) {
 			if (!(t2 = realloc(offs, sizeof(int) * (count + 1))))
 				die(wrap_err("Bad realloc:"));
 			offs = t2;
-			offs[count] = (t1 - *new_s) + (rs - ms) * count;
+			offs[count] = (t1 - *s) + (rs - ms) * count;
 			count++;
 		}
-		o = (t1 - *new_s) + 1;
+		o = (t1 - *s) + 1;
 	}
 
+	if (!offs)
+		return;
+
+	int nss = strlen(*s);
 	if ((rs - ms) > 0) {
-		if (!(t1 = realloc(*new_s, nss + (rs - ms) * count)))
+		if (!(t1 = realloc(*s, nss + 1 + (rs - ms) * count)))
 			die(wrap_err("Bad realloc:"));
-		*new_s = t1;
+		*s = t1;
 	}
 
 	for (int i = 0; i < count; i++) {
-		char* x = *new_s + offs[i];
+		char* x = *s + offs[i];
 		int d = strlen(x) - ms;
 		memmove(x + rs, x + ms, d);
 		memcpy(x, r, rs);
