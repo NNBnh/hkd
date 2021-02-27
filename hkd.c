@@ -175,9 +175,13 @@ int main (int argc, char *argv[])
 	dead = 0;
 	memset(&action, 0, sizeof(action));
 	action.sa_handler = int_handler;
-	sigaction(SIGINT, &action, NULL);
-	sigaction(SIGUSR1, &action, NULL);
-	sigaction(SIGCHLD, &action, NULL);
+	
+	if (sigaction(SIGINT, &action, NULL) == -1)
+		die(wrap_err("Error setting interrupt handler:"));
+	if (sigaction(SIGUSR1, &action, NULL) == -1)
+		die(wrap_err("Error setting interrupt handler:"));
+	if (sigaction(SIGCHLD, &action, NULL) == -1)
+		die(wrap_err("Error setting interrupt handler:"));
 
 	/* Parse config file */
 	parse_config_file();
